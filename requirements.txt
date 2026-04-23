@@ -1,0 +1,19 @@
+# --- Backend & Frontend ---
+fastapi==0.135.2
+uvicorn==0.42.0
+streamlit==1.55.0
+requests==2.32.5
+
+# --- AI & Database ---
+torch==2.11.0.dev20260209+cu128  # RTX 5070 based
+transformers==5.3.0
+chromadb==1.5.5
+
+# --- Data API Scrapers ---
+arxiv==2.4.1
+PyGithub==2.9.0
+huggingface_hub==1.7.2
+
+# --- Utilities ---
+python-dotenv==1.2.2
+pydantic==2.12.5
