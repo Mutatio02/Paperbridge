@@ -25,7 +25,7 @@ def get_data(query, mode):
     """검색 모드에 따라 백엔드에서 데이터를 가져오고, 없으면 자동 수집을 트리거합니다."""
     try:
         # 1. 백엔드 검색 요청 (모드 포함)
-        response = requests.get(f"{BACKEND_URL}/search", params={"query": query, "mode": mode}, timeout=10)
+        response = requests.get(f"{BACKEND_URL}/search", params={"query": query, "mode": mode}, timeout=60)
         data = response.json()
 
         # 2. 결과가 존재하면 즉시 반환
@@ -48,7 +48,7 @@ def get_data(query, mode):
 
 def sync_new_data(keyword):
     """RTX 5070 엔진을 가동하여 ArXiv, GitHub, HF 데이터를 수집합니다."""
-    with st.spinner(f"🚀 RTX 5070 가동 중: '{keyword}' 관련 최신 논문 및 코드 수집 중..."):
+    with st.spinner(f"'{keyword}' 관련 최신 논문 및 코드 수집 중..."):
         try:
             res = requests.post(f"{BACKEND_URL}/sync", params={"keyword": keyword}, timeout=100)
             if res.status_code == 200:

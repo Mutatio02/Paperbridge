@@ -4,7 +4,7 @@ import fitz
 import requests
 from io import BytesIO
 from backend.models.paper import PaperModel
-
+# 일단 5개만 가져오도록 설정
 def fetch_arxiv(keyword: str, max_results: int = 5):
     client = arxiv.Client()
     search = arxiv.Search(query=keyword, max_results=max_results)
@@ -25,13 +25,13 @@ def fetch_arxiv(keyword: str, max_results: int = 5):
         paper.temp_github_from_comment = github_from_comment 
         results.append(paper)
     return results
-
+# Comment 에서 github 주소 추출 (레포지터리 or 프로젝트 페이지)
 def extract_from_comment(comment_text):
     if not comment_text:
         return None
     match = re.search(r'https?://github\.com/[\w\-/]+', comment_text)
     return match.group(0).strip('.') if match else None
-
+# pdf 를 읽어 프로젝트 주소 or 레포지터리 탐색
 def extract_github_from_pdf(pdf_url):
     try:
         response = requests.get(pdf_url, timeout=10)
