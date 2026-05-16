@@ -1,102 +1,115 @@
-from backend.collectors.arxiv_collector import fetch_arxiv, extract_github_from_pdf
+import asyncio
+from backend.collectors.arxiv_collector import extract_github_from_pdf, extract_from_comment, get_metadata_by_id, fetch_arxiv
 from backend.collectors.github_collector import fetch_github_link
-from backend.collectors.hf_collector import HFCollector  # REST API 버전 클래스
+from backend.collectors.hf_collector import HFCollector
 from backend.core.embedder import PaperEmbedder
 from backend.core.vector_db import StorageManager
 from backend.models.paper import PaperModel 
 
 class PaperLinker:
     def __init__(self):
-        # RTX 5070의 자원을 효율적으로 사용하기 위해 인스턴스는 한 번만 생성
         self.embedder = PaperEmbedder()
         self.storage = StorageManager()
-        self.hf_collector = HFCollector() # REST API 기반 수집기
+        self.hf_collector = HFCollector()
 
     async def sync_data(self, keyword: str):
         """
-        [Waterfall Retrieval Strategy]
-        Step 1. Hugging Face에서 검증된 자산(논문+코드+모델) 우선 확보
-        Step 2. 결과 부족 시 ArXiv 탐색 및 다계층(Tiered) 코드 검색 가동
+        [Optimized Waterfall & Enrichment Strategy]
+        Stage 1. HF 우선 수집 및 ID 기반 고속 보완 (Comment -> PDF Scan)
+        Stage 2. 결과 부족 시 ArXiv 키워드 검색으로 데이터 영토 확장
+        Stage 3. 다계층 코드 탐색 (Comment -> PDF Scan -> GitHub API)
         """
-        print(f"--- [{keyword}] 동기화 시작 (Waterfall 전략) ---")
+        print(f"--- [{keyword}] 동기화 가동 (ID-First Waterfall) ---")
         total_saved = 0
-        verified_assets_count = 0  # 실제로 코드/모델이 있는 논문 수
-        
-        # --- [Step 1] Hugging Face 우선 탐색 (High Precision) ---
-        print("Step 1. Hugging Face REST API 사냥 중...")
+        verified_assets_count = 0 
+
+        # --- [Stage 1] Hugging Face 수집 및 ID 기반 정밀 보완 ---
+        print("Stage 1. HF 수집 및 ID 기반 고속 보완 중...")
         hf_raw_data = await self.hf_collector.fetch_hf_papers(keyword, limit=5)
         
         for data in hf_raw_data:
+            # 1. HF 자체 데이터 확인
+            github_url = data.get('github_url')
+            
+            # 2. 코드가 없다면 ArXiv ID로 즉시 보완 (Enrichment)
+            if not github_url:
+                arxiv_id = data['id']
+                print(f"🔍 [Enrichment] {arxiv_id} 보완 시작 (ID 기반)")
+                
+                # [Optimization] ID로 메타데이터(Comment)만 빠르게 가져오기
+                arxiv_meta = await get_metadata_by_id(arxiv_id)
+                if arxiv_meta:
+                    # Tier 1: 저자 코멘트 확인 (가장 빠름)
+                    github_url = extract_from_comment(arxiv_meta.get('comment'))
+                    
+                    # Tier 2: 코멘트에 없으면 PDF 본문 스캔
+                    if not github_url:
+                        print(f"📑 [Enrichment] Comment에 없음 -> PDF 본문 스캔: {arxiv_id}")
+                        github_url = await extract_github_from_pdf(arxiv_meta.get('pdf_url'))
+                    
+                    data['github_url'] = github_url
+
+            # DB 저장 및 벡터 임베딩
             paper_obj = PaperModel(**data)
-            
-            # 실제 자산(GitHub)이 있는지 확인
-            has_code = bool(paper_obj.github_url)
-            print(f"[HF Found] {paper_obj.title[:30]}... | Code: {has_code}")
-            
             vector = self.embedder.encode(paper_obj.summary)
             self.storage.save_all(paper_obj.model_dump(), vector)
             total_saved += 1
             
-            if has_code:
+            if paper_obj.github_url:
                 verified_assets_count += 1
+                print(f"✅ [HF+Alpha] {paper_obj.id} 확보 | Code: {paper_obj.github_url}")
 
-        # [수정된 조기 종료 조건]
-        # 단순히 3개가 아니라, '공식 코드 링크가 포함된 논문'이 1개라도 있을 때만 종료하거나
-        # 검색어와 제목이 어느 정도 유사할 때 종료하는 로직이 필요합니다.
-        if verified_assets_count >= 1: 
-            print(f"INFO: 코드 자산이 포함된 고품질 데이터를 확보하여 Sync를 종료합니다.")
+        # [조기 종료] 코드 자산이 충분(2개 이상)하면 종료
+        if verified_assets_count >= 2:
+            print(f"INFO: 고품질 자산 확보로 조기 종료합니다. (총 {total_saved}개)")
             return total_saved
 
-        # --- [Step 2] ArXiv Fallback (High Recall) ---
-        print("Step 2. 결과 보충을 위해 ArXiv 및 다계층 코드 탐색 시작...")
-        arxiv_papers = fetch_arxiv(keyword)
-        
+        # --- [Stage 2] ArXiv Fallback ---
+        print("Stage 2. ArXiv 키워드 검색으로 추가 데이터 확보 중...")
+        arxiv_papers = fetch_arxiv(keyword) 
+
         for p in arxiv_papers:
-            # 중복 체크: 이미 HF 단계에서 저장된 논문이면 건너뜀 (ArXiv ID 기준)
-            if self._is_already_saved(p.id):
+            # [수정] p.id 대신 entry_id에서 ID만 추출 (예: http://arxiv.org/abs/2110.03183v1 -> 2110.03183)
+            p_id = p.entry_id.split('/')[-1].split('v')[0]
+            
+            # 중복 체크
+            if self._is_already_saved(p_id):
                 continue
             
-            # 다계층 코드 검색 (Tiered Search)
+            # [Stage 3] 다계층 코드 탐색
             github_url = getattr(p, 'temp_github_from_comment', None)
             
-            # [Tier 3] PDF 본문 스캔 (HF에 정보가 없을 때만 실행)
             if not github_url:
-                github_url = extract_github_from_pdf(p.pdf_url)
+                github_url = await extract_github_from_pdf(p.pdf_url)
 
-            # [Tier 4] GitHub API 검색 (최후의 수단)
             if not github_url:
-                github_url = fetch_github_link(p.title)
+                github_url = await fetch_github_link(p.title)
 
-            print(f"[ArXiv Fallback] {p.id} 매칭 중 | GitHub: {bool(github_url)}")
-
-            # ArXiv에서 가져온 객체를 PaperModel 규격으로 변환
+            # [수정] PaperModel 생성 시에도 p_id 사용
             paper_obj = PaperModel(
-                id=p.id,
+                id=p_id,
                 title=p.title,
                 summary=p.summary,
                 authors=", ".join([a.name for a in p.authors]) if hasattr(p, 'authors') else "Unknown",
                 pdf_url=p.pdf_url,
-                published=str(p.published),
+                published=str(p.published.date()) if hasattr(p.published, 'date') else str(p.published),
                 github_url=github_url,
-                hf_url=None, # ArXiv 단독 데이터이므로 모델 링크는 초기값
+                hf_url=None, 
                 source="ArXiv",
-                upvotes=0,
-                temp_github_from_comment=getattr(p, 'temp_github_from_comment', None)
+                upvotes=0
             )
 
-            # 임베딩 생성 및 저장
             vector = self.embedder.encode(paper_obj.summary)
             self.storage.save_all(paper_obj.model_dump(), vector)
             total_saved += 1
-            
-        print(f"--- 동기화 완료: 총 {total_saved}개 논문 업데이트 ---")
+            print(f"➕ [ArXiv Added] {p_id} 확보")
+
+        print(f"--- 동기화 종료: 총 {total_saved}개 업데이트 ---")
         return total_saved
 
     def _is_already_saved(self, paper_id: str):
-        """DB 중복 확인용 헬퍼 함수"""
         res = self.storage.conn.execute("SELECT id FROM papers WHERE id=?", (paper_id,)).fetchone()
         return res is not None
 
     def search(self, query: str, mode: str):
-        """프론트엔드 대시보드 모드에 따른 통합 검색"""
         return self.storage.unified_search(query, mode)
